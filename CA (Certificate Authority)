@@ -1,0 +1,95 @@
+# Настройка PKI и Центра Сертификации (CA)
+
+Данная конфигурация предназначена для создания Root CA, промежуточного CA и выпуска сертификатов для веб- и почтовых сервисов в зоне `dmz.ws.kz`.
+
+## 1. Структура и подготовка
+Создание необходимых директорий и файлов базы данных OpenSSL.
+
+```shell
+mkdir -p /opt/grading/ca
+mkdir -p ~/ca/demoCA/newcerts
+cd ~/ca
+touch demoCA/index.txt
+echo 1000 > demoCA/serial
+echo 1000 > demoCA/crlnumber
+```
+
+## 2. Генерация корневого и промежуточного ЦС
+
+### Root CA (WS Root CA)
+```shell
+# Ключ и самоподписанный сертификат
+openssl genrsa -out root.key 4096
+openssl req -x509 -new -nodes -key root.key -sha256 -days 3650 \
+  -subj "/CN=WS Root CA/O=WorldSkills/C=KZ" \
+  -out /opt/grading/ca/ca.pem
+```
+
+### Список отзыва (CRL)
+Генерация файла для проверки отозванных сертификатов.
+```shell
+openssl ca -gencrl -keyfile root.key -cert /opt/grading/ca/ca.pem -out /opt/grading/ca/root.crl
+```
+
+## 3. Выпуск сертификатов сервисов
+Для выпуска используем файл расширений `ext.cnf` (для поддержки AIA и CDP).
+
+### Создание ext.cnf
+```ini
+[web_ext]
+subjectAltName = DNS:www.dmz.ws.kz
+authorityInfoAccess = OCSP;URI:http://ws.kz
+crlDistributionPoints = URI:http://ws.kz
+
+[mail_ext]
+subjectAltName = DNS:mail.dmz.ws.kz
+authorityInfoAccess = OCSP;URI:http://ws.kz
+crlDistributionPoints = URI:http://ws.kz
+```
+
+### Генерация для WWW и Mail
+```shell
+# Web Server
+openssl genrsa -out web.key 2048
+openssl req -new -key web.key -subj "/CN=www.dmz.ws.kz" -out web.csr
+openssl x509 -req -in web.csr -CA /opt/grading/ca/ca.pem -CAkey root.key \
+  -CAcreateserial -out /opt/grading/ca/web.pem -days 365 -sha256 -extfile ext.cnf -extensions web_ext
+
+# Mail Server
+openssl genrsa -out mail.key 2048
+openssl req -new -key mail.key -subj "/CN=mail.dmz.ws.kz" -out mail.csr
+openssl x509 -req -in mail.csr -CA /opt/grading/ca/ca.pem -CAkey root.key \
+  -CAcreateserial -out /opt/grading/ca/mail.pem -days 365 -sha256 -extfile ext.cnf -extensions mail_ext
+```
+
+## 4. Публикация сертификатов (Nginx)
+Настройка доступности файлов по адресу `http://ws.kz`.
+
+### Конфигурация Nginx
+```nginx
+server {
+    listen 80;
+    server_name ca.dmz.ws.kz;
+    root /var/www/ca;
+
+    location / {
+        autoindex on;
+    }
+}
+```
+
+### Копирование файлов
+```shell
+mkdir -p /var/www/ca
+cp /opt/grading/ca/ca.pem /var/www/ca/
+cp /opt/grading/ca/root.crl /var/www/ca/
+```
+
+## 5. Проверка
+```shell
+# Проверка полей AIA/CDP в сертификате
+openssl x509 -in /opt/grading/ca/web.pem -text -noout | grep -A 4 "Authority Information Access"
+
+# Проверка доступности через curl
+curl -I http://ws.kzca.pem
+```
